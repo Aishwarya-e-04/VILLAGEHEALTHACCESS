@@ -1,0 +1,9 @@
+
+{
+  "name": "VillageCare+",
+  "short_name": "VillageCare",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "description": "Offline-capable rural telehealth demo"
+}

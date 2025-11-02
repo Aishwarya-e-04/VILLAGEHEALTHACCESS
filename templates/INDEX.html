@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VillageCare+ PWA Prototype</title>
+
+    <!-- ✅ Link to the manifest (stored in static folder) -->
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+
+    <!-- ✅ Add icons (optional, for install screen) -->
+    <link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+    <meta name="theme-color" content="#ffffff" />
+
+    <style>
+      body { font-family: Arial, Helvetica, sans-serif; max-width: 900px; margin: 18px auto; padding: 8px; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 10px 0; }
+      input, select, textarea { width: 100%; padding: 8px; margin: 6px 0; box-sizing: border-box; }
+      button { padding: 10px 14px; margin-top: 8px; cursor: pointer; }
+      .row { display: flex; gap: 8px; }
+      .col { flex: 1; }
+      .risk-High { background: #ffd1d1; padding: 8px; border-radius: 6px; }
+      .risk-Medium { background: #fff2cc; padding: 8px; border-radius: 6px; }
+      .risk-Low { background: #dff0d8; padding: 8px; border-radius: 6px; }
+      .risk-Emergency { background: #ffb3b3; padding: 8px; border-radius: 6px; }
+    </style>
+  </head>
+
+  <body>
+    <h1>VillageCare+ (PWA Demo)</h1>
+    <p>Offline-capable village node. Try toggling offline in DevTools and create visits — they will queue and sync when online.</p>
+
+    <div class="card">
+      <h3>Patient</h3>
+      <label>Name <input id="name" placeholder="e.g., Ramu" /></label>
+      <label>Age <input id="age" type="number" value="30" /></label>
+      <button onclick="createPatient()">Create Patient</button>
+      <div id="patients"></div>
+    </div>
+
+    <div class="card">
+      <h3>Record Vitals & Triage</h3>
+      <label>Patient <select id="patient_select"></select></label>
+      <div class="row">
+        <div class="col"><label>BP systolic <input id="bp_sys" type="number" value="120" /></label></div>
+        <div class="col"><label>BP diastolic <input id="bp_dia" type="number" value="80" /></label></div>
+      </div>
+      <label>SpO2 (%) <input id="spo2" type="number" value="98" /></label>
+      <label>Temperature (°C) <input id="temp" type="number" step="0.1" value="36.7" /></label>
+      <label>Glucose (mg/dL) <input id="glucose" type="number" /></label>
+      <label>Symptoms (comma separated) <input id="symptoms" /></label>
+      <div style="display:flex;gap:8px">
+        <button onclick="recordVisit()">Record Visit (queue)</button>
+        <button onclick="syncOutbox()">Manual Sync</button>
+        <button style="background:#c62828;color:white" onclick="triggerEmergency()">EMERGENCY</button>
+      </div>
+      <pre id="triage_result"></pre>
+    </div>
+
+    <div class="card">
+      <h3>Teleconsult (Mock)</h3>
+      <button onclick="requestTele()">Request Teleconsult</button>
+      <div id="tele"></div>
+    </div>
+
+    <div class="card">
+      <h3>Outbox (Queued while offline)</h3>
+      <pre id="outbox"></pre>
+    </div>
+
+    <!-- LocalForage for offline data -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+
+    <script>
+      // ✅ Register the Service Worker (points to /static/sw.js)
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('{{ url_for("static", filename="sw.js") }}')
+          .then(() => console.log('✅ Service Worker registered'))
+          .catch(err => console.error('SW registration failed:', err));
+      }
+
+      // setup localForage
+      localforage.config({name:'villagecare', storeName:'outbox'});
+
+      async function createPatient(){
+        const name = document.getElementById('name').value || 'Anonymous';
+        const age = parseInt(document.getElementById('age').value) || 30;
+        const res = await fetch('/api/patient', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({name, age})
+        });
+        const p = await res.json();
+        await loadPatients();
+        alert('Created patient ' + p.id);
+      }
+
+      async function loadPatients(){
+        const res = await fetch('/api/patient');
+        const list = await res.json();
+        const sel = document.getElementById('patient_select'); sel.innerHTML='';
+        list.forEach(p=>{
+          const opt = document.createElement('option');
+          opt.value=p.id; opt.textContent = `${p.name} (age ${p.age})`;
+          sel.appendChild(opt);
+        });
+        document.getElementById('patients').innerText = JSON.stringify(list,null,2);
+      }
+
+      async function recordVisit(){
+        const pid = document.getElementById('patient_select').value;
+        if(!pid){ alert('Create/select patient'); return; }
+        const visit = {
+          temp_id: 't-'+Date.now(),
+          type:'visit',
+          payload:{
+            patient_id: pid,
+            bp_sys: parseFloat(document.getElementById('bp_sys').value),
+            bp_dia: parseFloat(document.getElementById('bp_dia').value),
+            spo2: parseFloat(document.getElementById('spo2').value),
+            temperature: parseFloat(document.getElementById('temp').value),
+            glucose: parseFloat(document.getElementById('glucose').value) || null,
+            symptoms: document.getElementById('symptoms').value.split(',').map(s=>s.trim()).filter(Boolean),
+            ts: new Date().toISOString()
+          }
+        };
+        // enqueue
+        const out = await localforage.getItem('outbox') || [];
+        out.push(visit);
+        await localforage.setItem('outbox', out);
+        document.getElementById('outbox').innerText = JSON.stringify(out, null, 2);
+        document.getElementById('triage_result').innerText = 'Queued visit (offline-ready)' + JSON.stringify(visit.payload, null, 2);
+        // show local triage immediately
+        const res = await fetch('/api/triage', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({patient_id: pid, ...visit.payload})});
+        const body = await res.json();
+        document.getElementById('triage_result').innerText = JSON.stringify(body, null, 2);
+      }
+
+      async function syncOutbox(){
+        const out = await localforage.getItem('outbox') || [];
+        if(out.length === 0){ alert('Nothing to sync'); return; }
+        if(!navigator.onLine){ alert('Offline — cannot sync'); return; }
+        const res = await fetch('/api/sync/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: out})});
+        if(res.ok){
+          const body = await res.json();
+          await localforage.setItem('outbox', []);
+          document.getElementById('outbox').innerText = '';
+          alert('Synced: ' + JSON.stringify(body));
+        }else{
+          alert('Sync failed');
+        }
+      }
+
+      async function requestTele(){
+        const pid = document.getElementById('patient_select').value;
+        const res = await fetch('/api/teleconsult', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({patient_id: pid})});
+        const body = await res.json();
+        document.getElementById('tele').innerText = JSON.stringify(body, null, 2);
+      }
+
+      async function triggerEmergency(){
+        const pid = document.getElementById('patient_select').value;
+        const res = await fetch('/api/emergency', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({patient_id: pid, location:{lat:0,lng:0}, type:'breathless'})});
+        const body = await res.json();
+        alert('Emergency triggered: ' + JSON.stringify(body));
+      }
+
+      (async ()=>{
+        await loadPatients();
+        const out = await localforage.getItem('outbox') || [];
+        document.getElementById('outbox').innerText = JSON.stringify(out, null, 2);
+      })();
+
+      window.addEventListener('online', ()=>{ console.log('Back online — try Manual Sync or it will auto sync later'); });
+    </script>
+  </body>
+</html>
