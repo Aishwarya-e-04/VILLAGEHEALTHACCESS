@@ -204,4 +204,5 @@ def api_admin_data():
     return jsonify({'patients': list(PATIENTS.values()), 'visits': list(VISITS.values())})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0',port=10000)
+
